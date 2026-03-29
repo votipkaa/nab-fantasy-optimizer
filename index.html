@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NBA Fantasy Lineup Optimizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            slate: { 950: '#020617' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { margin: 0; background: #020617; }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+    input[type="number"] { -moz-appearance: textfield; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useMemo } = React;
+
+    // ═══════════════════════════════════════════════════════════════
+    // CONSTANTS
+    // ═══════════════════════════════════════════════════════════════
+
+    const SCORING = { FGM: 2, FGA: -1, FTM: 1, FTA: -1, TPM: 1, REB: 1, AST: 2, STL: 4, BLK: 4, TO: -2, PTS: 1 };
+
+    const ROSTER_SLOTS = [
+      { id: "PG", label: "PG", eligible: ["PG"] },
+      { id: "SG", label: "SG", eligible: ["SG"] },
+      { id: "SF", label: "SF", eligible: ["SF"] },
+      { id: "PF", label: "PF", eligible: ["PF"] },
+      { id: "C", label: "C", eligible: ["C"] },
+      { id: "G", label: "G", eligible: ["PG", "SG"] },
+      { id: "F", label: "F", eligible: ["SF", "PF"] },
+      { id: "UTIL1", label: "UTIL", eligible: ["PG", "SG", "SF", "PF", "C"] },
+      { id: "UTIL2", label: "UTIL", eligible: ["PG", "SG", "SF", "PF", "C"] },
+      { id: "UTIL3", label: "UTIL", eligible: ["PG", "SG", "SF", "PF", "C"] },
+    ];
+
+    const ESPN_STAT_IDS = { 0: "PTS", 1: "BLK", 2: "STL", 3: "AST", 6: "REB", 11: "TO", 13: "FGM", 14: "FGA", 15: "FTM", 16: "FTA", 17: "TPM" };
+    const ESPN_POS_MAP = { 1: "PG", 2: "SG", 3: "SF", 4: "PF", 5: "C" };
+    const ESPN_TEAM_MAP = {
+      1:"ATL",2:"BOS",3:"NOP",4:"CHI",5:"CLE",6:"DAL",7:"DEN",8:"DET",9:"GSW",10:"HOU",
+      11:"IND",12:"LAC",13:"LAL",14:"MIA",15:"MIL",16:"MIN",17:"BKN",18:"NYK",19:"ORL",
+      20:"PHI",21:"PHX",22:"POR",23:"SAC",24:"SAS",25:"OKC",26:"UTA",27:"WAS",28:"TOR",29:"MEM",30:"CHA"
+    };
+
+    const NBA_TEAMS = ["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR","UTA","WAS"];
+    const POSITIONS = ["PG", "SG", "SF", "PF", "C"];
+    const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+    // ═══════════════════════════════════════════════════════════════
+    // UTILITIES
+    // ═══════════════════════════════════════════════════════════════
+
+    function calcFPTS(stats) {
+      return Object.entries(SCORING).reduce((t, [k, w]) => t + (stats[k] || 0) * w, 0);
+    }
+
+    function formatDate(dateStr) {
+      const d = new Date(dateStr + "T12:00:00");
+      return `${DAY_NAMES[d.getDay()]} ${d.getMonth() + 1}/${d.getDate()}`;
+    }
+
+    function optimizeLineup(players, slots = ROSTER_SLOTS) {
+      const available = players.filter(p => p.isPlaying && !p.injured);
+      if (!available.length) return { lineup: slots.map(() => null), score: 0 };
+
+      const indexed = slots.map((s, i) => ({ ...s, oi: i }));
+      indexed.sort((a, b) => a.eligible.length - b.eligible.length);
+
+      let bestScore = -Infinity, bestLineup = null;
+
+      function solve(si, used, cur, score) {
+        if (si === indexed.length) {
+          if (score > bestScore) { bestScore = score; bestLineup = [...cur]; }
+          return;
+        }
+        const rem = available.filter(p => !used.has(p.id)).map(p => p.projFPTS).sort((a, b) => b - a);
+        const maxRem = rem.slice(0, indexed.length - si).reduce((s, v) => s + Math.max(0, v), 0);
+        if (score + maxRem <= bestScore) return;
+
+        const slot = indexed[si];
+        const cands = available
+          .filter(p => !used.has(p.id) && slot.eligible.some(pos => p.positions.includes(pos)))
+          .sort((a, b) => b.projFPTS - a.projFPTS);
+
+        for (const p of cands) {
+          used.add(p.id); cur[si] = p;
+          solve(si + 1, used, cur, score + p.projFPTS);
+          cur[si] = null; used.delete(p.id);
+        }
+        cur[si] = null;
+        solve(si + 1, used, cur, score);
+      }
+
+      solve(0, new Set(), new Array(indexed.length).fill(null), 0);
+      const final = new Array(slots.length).fill(null);
+      if (bestLineup) indexed.forEach((s, i) => { final[s.oi] = bestLineup[i]; });
+      return { lineup: final, score: bestScore < 0 ? 0 : bestScore };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // COMPONENTS
+    // ═══════════════════════════════════════════════════════════════
+
+    const Badge = ({ children, color = "bg-slate-700" }) => (
+      <span className={`${color} text-xs px-2 py-0.5 rounded-full font-medium`}>{children}</span>
+    );
+
+    const StatPill = ({ label, value, color = "text-slate-300" }) => (
+      <div className="text-center">
+        <div className={`text-xs ${color} font-mono`}>{typeof value === "number" ? value.toFixed(1) : value}</div>
+        <div className="text-[10px] text-slate-500 uppercase">{label}</div>
+      </div>
+    );
+
+    const TabButton = ({ active, onClick, children, icon }) => (
+      <button onClick={onClick} className={`px-3 py-2 text-sm font-medium rounded-lg transition-all flex items-center gap-1.5 ${active ? "bg-orange-600 text-white shadow-lg shadow-orange-600/25" : "text-slate-400 hover:text-white hover:bg-slate-800"}`}>
+        <span>{icon}</span><span className="hidden sm:inline">{children}</span>
+      </button>
+    );
+
+    function ScoringRef() {
+      return (
+        <div className="flex flex-wrap gap-2 text-xs mt-2">
+          {Object.entries(SCORING).map(([k, v]) => (
+            <span key={k} className={`px-2 py-0.5 rounded ${v > 0 ? "bg-green-900/40 text-green-400" : "bg-red-900/40 text-red-400"}`}>
+              {k}: {v > 0 ? "+" : ""}{v}
+            </span>
+          ))}
+        </div>
+      );
+    }
+
+    function PlayerForm({ onAdd, label }) {
+      const [name, setName] = useState("");
+      const [positions, setPositions] = useState(["PG"]);
+      const [team, setTeam] = useState("ATL");
+      const [ppg, setPpg] = useState(""); const [rpg, setRpg] = useState("");
+      const [apg, setApg] = useState(""); const [spg, setSpg] = useState("");
+      const [bpg, setBpg] = useState(""); const [tpg, setTpg] = useState("");
+      const [tpm, setTpm] = useState(""); const [fga, setFga] = useState("");
+      const [fgp, setFgp] = useState(""); const [fta, setFta] = useState("");
+      const [ftp, setFtp] = useState("");
+
+      const handleSubmit = () => {
+        if (!name.trim()) return;
+        const fgaVal = parseFloat(fga) || 0, fgpVal = parseFloat(fgp) || 0;
+        const ftaVal = parseFloat(fta) || 0, ftpVal = parseFloat(ftp) || 0;
+        const stats = {
+          PTS: parseFloat(ppg)||0, REB: parseFloat(rpg)||0, AST: parseFloat(apg)||0,
+          STL: parseFloat(spg)||0, BLK: parseFloat(bpg)||0, TO: parseFloat(tpg)||0,
+          TPM: parseFloat(tpm)||0, FGA: fgaVal, FGM: fgaVal * (fgpVal / 100),
+          FTA: ftaVal, FTM: ftaVal * (ftpVal / 100),
+        };
+        onAdd({ id: Date.now() + Math.random(), name: name.trim(), positions, team, stats, injured: false, projFPTS: calcFPTS(stats) });
+        setName(""); setPpg(""); setRpg(""); setApg(""); setSpg(""); setBpg(""); setTpg(""); setTpm(""); setFga(""); setFgp(""); setFta(""); setFtp("");
+      };
+
+      const togglePos = (pos) => setPositions(prev => prev.includes(pos) ? (prev.length > 1 ? prev.filter(p => p !== pos) : prev) : [...prev, pos]);
+
+      const preview = (() => {
+        const fgaV = parseFloat(fga)||0, fgpV = parseFloat(fgp)||0, ftaV = parseFloat(fta)||0, ftpV = parseFloat(ftp)||0;
+        return calcFPTS({ PTS: parseFloat(ppg)||0, REB: parseFloat(rpg)||0, AST: parseFloat(apg)||0, STL: parseFloat(spg)||0, BLK: parseFloat(bpg)||0, TO: parseFloat(tpg)||0, TPM: parseFloat(tpm)||0, FGA: fgaV, FGM: fgaV*(fgpV/100), FTA: ftaV, FTM: ftaV*(ftpV/100) });
+      })();
+
+      return (
+        <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700">
+          <h3 className="text-sm font-semibold text-slate-300 mb-3">{label}</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="Player name" className="col-span-2 bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-orange-500 focus:outline-none" />
+            <select value={team} onChange={e => setTeam(e.target.value)} className="bg-slate-900 border border-slate-600 rounded-lg px-2 py-2 text-sm text-white focus:border-orange-500 focus:outline-none">
+              {NBA_TEAMS.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <div className="flex gap-1 items-center flex-wrap">
+              {POSITIONS.map(p => (
+                <button key={p} onClick={() => togglePos(p)} className={`text-[10px] px-1.5 py-0.5 rounded ${positions.includes(p) ? "bg-orange-600 text-white" : "bg-slate-700 text-slate-400"}`}>{p}</button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-4 sm:grid-cols-6 gap-2 mb-3">
+            {[["PPG",ppg,setPpg],["RPG",rpg,setRpg],["APG",apg,setApg],["SPG",spg,setSpg],["BPG",bpg,setBpg],["TO",tpg,setTpg],["3PM",tpm,setTpm],["FGA",fga,setFga],["FG%",fgp,setFgp],["FTA",fta,setFta],["FT%",ftp,setFtp]].map(([lbl,val,set]) => (
+              <div key={lbl}>
+                <label className="text-[10px] text-slate-500 uppercase block mb-0.5">{lbl}</label>
+                <input value={val} onChange={e => set(e.target.value)} type="number" step="0.1" className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white font-mono focus:border-orange-500 focus:outline-none" />
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-400">Projected FPTS/game: <span className={`font-bold font-mono ${preview > 30 ? "text-green-400" : preview > 20 ? "text-yellow-400" : "text-orange-400"}`}>{preview.toFixed(1)}</span></div>
+            <button onClick={handleSubmit} className="bg-orange-600 hover:bg-orange-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">Add Player</button>
+          </div>
+        </div>
+      );
+    }
+
+    function PlayerList({ players, onRemove, onToggleInjured, schedule, matchupDates, label }) {
+      const sorted = [...players].sort((a, b) => b.projFPTS - a.projFPTS);
+      const totalGames = players.reduce((t, p) => t + matchupDates.filter(d => (schedule[d] || []).includes(p.team) && !p.injured).length, 0);
+
+      return (
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-slate-300">{label} ({players.length} players, {totalGames} total games)</h3>
+          </div>
+          {sorted.length === 0 ? (
+            <div className="text-center py-8 text-slate-500 text-sm">No players added yet.</div>
+          ) : (
+            <div className="space-y-1.5">
+              {sorted.map(p => {
+                const gameDays = matchupDates.filter(d => (schedule[d] || []).includes(p.team));
+                return (
+                  <div key={p.id} className={`flex items-center gap-3 bg-slate-800/60 rounded-lg px-3 py-2 border ${p.injured ? "border-red-800/50 opacity-60" : "border-slate-700/50"}`}>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium text-white truncate">{p.name}</span>
+                        <Badge>{p.team}</Badge>
+                        {p.positions.map(pos => <Badge key={pos} color="bg-slate-600">{pos}</Badge>)}
+                        {p.injured && <Badge color="bg-red-900 text-red-300">OUT</Badge>}
+                      </div>
+                      <div className="flex gap-3 mt-1">
+                        <StatPill label="FPTS" value={p.projFPTS} color="text-orange-400" />
+                        <StatPill label="PTS" value={p.stats.PTS} />
+                        <StatPill label="REB" value={p.stats.REB} />
+                        <StatPill label="AST" value={p.stats.AST} />
+                        <StatPill label="STL" value={p.stats.STL} />
+                        <StatPill label="BLK" value={p.stats.BLK} />
+                        <StatPill label="GP" value={gameDays.length} color={gameDays.length >= 4 ? "text-green-400" : gameDays.length >= 3 ? "text-yellow-400" : "text-red-400"} />
+                      </div>
+                    </div>
+                    <div className="flex gap-1">
+                      {matchupDates.map(d => {
+                        const plays = (schedule[d] || []).includes(p.team);
+                        return <div key={d} className={`w-2.5 h-2.5 rounded-full ${plays ? "bg-green-500" : "bg-slate-700"}`} title={`${formatDate(d)}: ${plays ? "Playing" : "Off"}`} />;
+                      })}
+                    </div>
+                    <div className="flex gap-1">
+                      <button onClick={() => onToggleInjured(p.id)} className={`text-xs px-2 py-1 rounded ${p.injured ? "bg-green-900/50 text-green-400" : "bg-red-900/50 text-red-400"}`}>
+                        {p.injured ? "Activate" : "INJ"}
+                      </button>
+                      <button onClick={() => onRemove(p.id)} className="text-xs px-2 py-1 rounded bg-slate-700 text-slate-400 hover:bg-red-900/50 hover:text-red-400">X</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function JsonPasteModal({ onClose, onImport }) {
+      const [json, setJson] = useState("");
+      const [err, setErr] = useState("");
+      const handleImport = () => {
+        try { const data = JSON.parse(json); onImport(data); onClose(); }
+        catch (e) { setErr("Invalid JSON. Copy the full API response."); }
+      };
+      return (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 rounded-xl p-6 max-w-2xl w-full max-h-[80vh] flex flex-col border border-slate-600">
+            <h3 className="text-lg font-bold text-white mb-2">Paste ESPN API JSON</h3>
+            <p className="text-sm text-slate-400 mb-3">Open this URL in your browser while logged into ESPN, then paste the response:</p>
+            <code className="block text-xs bg-slate-900 p-2 rounded text-orange-400 break-all mb-3">
+              https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/2026/segments/0/leagues/YOUR_LEAGUE_ID?view=mTeam&view=mRoster&view=mMatchup
+            </code>
+            <textarea value={json} onChange={e => { setJson(e.target.value); setErr(""); }} className="flex-1 bg-slate-900 border border-slate-600 rounded-lg p-3 text-xs text-white font-mono min-h-[200px] focus:border-orange-500 focus:outline-none" placeholder="Paste JSON here..." />
+            {err && <div className="text-red-400 text-xs mt-2">{err}</div>}
+            <div className="flex gap-2 mt-3 justify-end">
+              <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg bg-slate-700 text-slate-300 hover:bg-slate-600">Cancel</button>
+              <button onClick={handleImport} className="px-4 py-2 text-sm rounded-lg bg-orange-600 text-white hover:bg-orange-500">Import</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // MAIN APP
+    // ═══════════════════════════════════════════════════════════════
+
+    function App() {
+      const [tab, setTab] = useState("setup");
+      const [leagueId, setLeagueId] = useState("");
+      const [teamId, setTeamId] = useState("");
+      const [swid, setSwid] = useState("");
+      const [espnS2, setEspnS2] = useState("");
+      const [myPlayers, setMyPlayers] = useState([]);
+      const [oppPlayers, setOppPlayers] = useState([]);
+      const [matchupStart, setMatchupStart] = useState("");
+      const [matchupDates, setMatchupDates] = useState([]);
+      const [schedule, setSchedule] = useState({});
+      const [loading, setLoading] = useState(false);
+      const [status, setStatus] = useState("");
+      const [error, setError] = useState("");
+      const [showJsonModal, setShowJsonModal] = useState(false);
+      const [selectedDay, setSelectedDay] = useState(null);
+
+      useEffect(() => {
+        const today = new Date();
+        const dow = today.getDay();
+        const mon = new Date(today);
+        mon.setDate(today.getDate() - (dow === 0 ? 6 : dow - 1));
+        const start = mon.toISOString().split("T")[0];
+        setMatchupStart(start);
+        const dates = [];
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(mon); d.setDate(mon.getDate() + i);
+          dates.push(d.toISOString().split("T")[0]);
+        }
+        setMatchupDates(dates);
+      }, []);
+
+      const updateMatchupDates = useCallback((start) => {
+        setMatchupStart(start);
+        const d = new Date(start + "T12:00:00");
+        const dates = [];
+        for (let i = 0; i < 7; i++) {
+          const nd = new Date(d); nd.setDate(d.getDate() + i);
+          dates.push(nd.toISOString().split("T")[0]);
+        }
+        setMatchupDates(dates);
+        setSchedule({});
+      }, []);
+
+      const fetchSchedule = useCallback(async () => {
+        if (!matchupDates.length) return;
+        setLoading(true); setStatus("Fetching NBA schedule...");
+        const newSched = {};
+        for (const date of matchupDates) {
+          try {
+            const ds = date.replace(/-/g, "");
+            const r = await fetch(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ds}`);
+            const data = await r.json();
+            const teams = [];
+            (data.events || []).forEach(ev => {
+              (ev.competitions?.[0]?.competitors || []).forEach(c => teams.push(c.team.abbreviation));
+            });
+            newSched[date] = teams;
+          } catch { newSched[date] = []; }
+        }
+        setSchedule(newSched); setLoading(false);
+        setStatus("Schedule loaded!"); setTimeout(() => setStatus(""), 3000);
+      }, [matchupDates]);
+
+      useEffect(() => {
+        if (matchupDates.length > 0 && Object.keys(schedule).length === 0) fetchSchedule();
+      }, [matchupDates]);
+
+      const fetchESPN = useCallback(async () => {
+        if (!leagueId) { setError("Enter League ID"); return; }
+        setLoading(true); setError(""); setStatus("Connecting to ESPN...");
+        try {
+          const base = `https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/2026/segments/0/leagues/${leagueId}?view=mTeam&view=mRoster&view=mMatchup&view=mSettings`;
+          const proxy = `https://corsproxy.io/?${encodeURIComponent(base)}`;
+          const headers = {};
+          if (swid) headers["x-espn-swid"] = swid;
+          if (espnS2) headers["x-espn-s2"] = espnS2;
+          const r = await fetch(proxy, { headers });
+          if (!r.ok) throw new Error(`HTTP ${r.status} - Try Paste JSON`);
+          importESPNData(await r.json());
+        } catch (e) { setError(`ESPN fetch failed: ${e.message}`); }
+        setLoading(false);
+      }, [leagueId, teamId, swid, espnS2]);
+
+      function importESPNData(data) {
+        if (!data.teams) { setError("No team data found"); return; }
+        const parseRoster = (td) => {
+          if (!td?.roster?.entries) return [];
+          return td.roster.entries.map(entry => {
+            const pl = entry.playerPoolEntry?.player || {};
+            const pos = [...new Set((pl.eligibleSlots || []).map(s => ESPN_POS_MAP[s]).filter(Boolean))];
+            const stats = {};
+            const szn = pl.stats?.find(s => s.statSplitTypeId === 0 && s.seasonId === 2026) || pl.stats?.find(s => s.statSourceId === 0) || pl.stats?.[0];
+            if (szn?.averageStats) Object.entries(szn.averageStats).forEach(([id, v]) => { const nm = ESPN_STAT_IDS[parseInt(id)]; if (nm) stats[nm] = v; });
+            return { id: pl.id || Math.random(), name: pl.fullName || `Player ${pl.id}`, positions: pos.length ? pos : ["PG"], team: ESPN_TEAM_MAP[pl.proTeamId] || "FA", stats, injured: pl.injured || false, projFPTS: calcFPTS(stats) };
+          });
+        };
+        const tid = parseInt(teamId) || data.teams[0]?.id;
+        const myTeam = data.teams.find(t => t.id === tid);
+        if (myTeam) { setMyPlayers(parseRoster(myTeam)); setStatus(`Loaded: ${myTeam.name || myTeam.nickname || "Team"}`); }
+        if (data.schedule) {
+          const mp = data.status?.currentMatchupPeriod;
+          const m = data.schedule.find(m => m.matchupPeriodId === mp && (m.home?.teamId === tid || m.away?.teamId === tid));
+          if (m) {
+            const oid = m.home?.teamId === tid ? m.away?.teamId : m.home?.teamId;
+            const ot = data.teams.find(t => t.id === oid);
+            if (ot) setOppPlayers(parseRoster(ot));
+          }
+        }
+        setTab("roster");
+      }
+
+      const addMyPlayer = (p) => setMyPlayers(prev => [...prev, p]);
+      const addOppPlayer = (p) => setOppPlayers(prev => [...prev, p]);
+      const removeMyPlayer = (id) => setMyPlayers(prev => prev.filter(p => p.id !== id));
+      const removeOppPlayer = (id) => setOppPlayers(prev => prev.filter(p => p.id !== id));
+      const toggleMyInjured = (id) => setMyPlayers(prev => prev.map(p => p.id === id ? { ...p, injured: !p.injured } : p));
+      const toggleOppInjured = (id) => setOppPlayers(prev => prev.map(p => p.id === id ? { ...p, injured: !p.injured } : p));
+
+      const dailyLineups = useMemo(() => {
+        return matchupDates.map(date => {
+          const teams = schedule[date] || [];
+          const withStatus = myPlayers.map(p => ({ ...p, isPlaying: teams.includes(p.team) && !p.injured }));
+          const result = optimizeLineup(withStatus);
+          const bench = withStatus.filter(p => p.isPlaying && !result.lineup.includes(p));
+          const sitting = withStatus.filter(p => !p.isPlaying);
+          return { date, ...result, bench, sitting, teamsPlaying: teams };
+        });
+      }, [myPlayers, matchupDates, schedule]);
+
+      const oppDaily = useMemo(() => {
+        return matchupDates.map(date => {
+          const teams = schedule[date] || [];
+          const playing = oppPlayers.filter(p => teams.includes(p.team) && !p.injured);
+          const sorted = [...playing].sort((a, b) => b.projFPTS - a.projFPTS);
+          const starting = sorted.slice(0, 10);
+          return { date, score: starting.reduce((s, p) => s + p.projFPTS, 0), count: starting.length };
+        });
+      }, [oppPlayers, matchupDates, schedule]);
+
+      const myTotal = dailyLineups.reduce((s, d) => s + d.score, 0);
+      const oppTotal = oppDaily.reduce((s, d) => s + d.score, 0);
+      const myGames = dailyLineups.reduce((s, d) => s + d.lineup.filter(Boolean).length, 0);
+      const oppGames = oppDaily.reduce((s, d) => s + d.count, 0);
+
+      return (
+        <div className="min-h-screen bg-slate-950 text-white">
+          {showJsonModal && <JsonPasteModal onClose={() => setShowJsonModal(false)} onImport={(data) => { importESPNData(data); setShowJsonModal(false); }} />}
+
+          {/* Header */}
+          <div className="bg-gradient-to-r from-slate-900 via-slate-900 to-orange-950 border-b border-slate-800 px-4 py-3">
+            <div className="max-w-6xl mx-auto">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h1 className="text-xl font-bold"><span className="text-orange-500">NBA Fantasy</span> Lineup Optimizer</h1>
+                  <p className="text-xs text-slate-400 mt-0.5">H2H Points League &middot; Final Week Domination Mode</p>
+                </div>
+                <div className="text-right">
+                  {myTotal > 0 && <div className={`text-lg font-bold font-mono ${myTotal > oppTotal ? "text-green-400" : myTotal < oppTotal ? "text-red-400" : "text-yellow-400"}`}>{myTotal.toFixed(0)} - {oppTotal.toFixed(0)}</div>}
+                  {status && <div className="text-xs text-orange-400 mt-0.5">{status}</div>}
+                </div>
+              </div>
+              <ScoringRef />
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div className="border-b border-slate-800 px-4 py-2 bg-slate-900/50">
+            <div className="max-w-6xl mx-auto flex gap-1 overflow-x-auto">
+              <TabButton active={tab === "setup"} onClick={() => setTab("setup")} icon="&#9881;">Setup</TabButton>
+              <TabButton active={tab === "roster"} onClick={() => setTab("roster")} icon="&#128101;">Rosters</TabButton>
+              <TabButton active={tab === "schedule"} onClick={() => setTab("schedule")} icon="&#128197;">Schedule</TabButton>
+              <TabButton active={tab === "optimizer"} onClick={() => setTab("optimizer")} icon="&#9889;">Optimizer</TabButton>
+              <TabButton active={tab === "battle"} onClick={() => setTab("battle")} icon="&#127942;">H2H Battle</TabButton>
+            </div>
+          </div>
+
+          {error && (
+            <div className="max-w-6xl mx-auto px-4 mt-3">
+              <div className="bg-red-900/30 border border-red-800 rounded-lg px-4 py-2 text-sm text-red-300 flex justify-between items-center">
+                <span>{error}</span><button onClick={() => setError("")} className="text-red-400 hover:text-red-200 ml-2">X</button>
+              </div>
+            </div>
+          )}
+
+          <div className="max-w-6xl mx-auto px-4 py-4">
+
+            {/* SETUP */}
+            {tab === "setup" && (
+              <div className="space-y-6">
+                <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
+                  <h2 className="text-lg font-bold mb-1">Connect to ESPN Fantasy</h2>
+                  <p className="text-sm text-slate-400 mb-4">Enter your league details to auto-import rosters.</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+                    <div><label className="text-xs text-slate-400 block mb-1">League ID *</label><input value={leagueId} onChange={e => setLeagueId(e.target.value)} placeholder="e.g. 12345678" className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-orange-500 focus:outline-none" /></div>
+                    <div><label className="text-xs text-slate-400 block mb-1">Your Team ID *</label><input value={teamId} onChange={e => setTeamId(e.target.value)} placeholder="e.g. 1" className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-orange-500 focus:outline-none" /></div>
+                    <div><label className="text-xs text-slate-400 block mb-1">SWID (private leagues)</label><input value={swid} onChange={e => setSwid(e.target.value)} placeholder="{XXXXXXXX-...}" className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-orange-500 focus:outline-none" /></div>
+                    <div><label className="text-xs text-slate-400 block mb-1">espn_s2 (private leagues)</label><input value={espnS2} onChange={e => setEspnS2(e.target.value)} placeholder="AEB..." className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-orange-500 focus:outline-none" /></div>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    <button onClick={fetchESPN} disabled={loading} className="bg-orange-600 hover:bg-orange-500 disabled:bg-slate-700 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">{loading ? "Loading..." : "Fetch from ESPN"}</button>
+                    <button onClick={() => setShowJsonModal(true)} className="bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">Paste JSON Instead</button>
+                    <button onClick={() => setTab("roster")} className="bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">Skip → Manual Entry</button>
+                  </div>
+                </div>
+
+                <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
+                  <h2 className="text-lg font-bold mb-1">Matchup Week</h2>
+                  <p className="text-sm text-slate-400 mb-4">Set the Monday your matchup starts (Mon-Sun).</p>
+                  <div className="flex gap-3 items-end">
+                    <div><label className="text-xs text-slate-400 block mb-1">Matchup Start (Monday)</label><input type="date" value={matchupStart} onChange={e => updateMatchupDates(e.target.value)} className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:border-orange-500 focus:outline-none" /></div>
+                    <button onClick={fetchSchedule} disabled={loading} className="bg-slate-700 hover:bg-slate-600 text-sm px-4 py-2 rounded-lg text-white">{loading ? "..." : "Refresh Schedule"}</button>
+                  </div>
+                  {matchupDates.length > 0 && (
+                    <div className="flex gap-2 mt-3 overflow-x-auto">
+                      {matchupDates.map(d => (
+                        <div key={d} className="text-center bg-slate-800 rounded-lg px-3 py-2 flex-1 min-w-[70px]">
+                          <div className="text-xs text-slate-400">{formatDate(d)}</div>
+                          <div className="text-sm font-bold text-orange-400">{(schedule[d] || []).length / 2 || "?"}</div>
+                          <div className="text-[10px] text-slate-500">games</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-slate-900 rounded-xl p-6 border border-slate-800">
+                  <h2 className="text-lg font-bold mb-2">How to Find Your ESPN Cookies</h2>
+                  <div className="text-sm text-slate-400 space-y-2">
+                    <p>1. Go to <span className="text-orange-400">espn.com</span> and log in</p>
+                    <p>2. Open DevTools (F12) → Application → Cookies → espn.com</p>
+                    <p>3. Find <span className="text-orange-400 font-mono">SWID</span> and <span className="text-orange-400 font-mono">espn_s2</span></p>
+                    <p>4. League ID: in your URL → fantasy.espn.com/basketball/league?leagueId=<span className="text-orange-400">XXXXXXX</span></p>
+                    <p>5. Team ID: in your team URL → ...teamId=<span className="text-orange-400">X</span></p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ROSTERS */}
+            {tab === "roster" && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-lg font-bold mb-3 text-green-400">My Team</h2>
+                  <PlayerForm onAdd={addMyPlayer} label="Add Player to My Team" />
+                  <div className="mt-4"><PlayerList players={myPlayers} onRemove={removeMyPlayer} onToggleInjured={toggleMyInjured} schedule={schedule} matchupDates={matchupDates} label="My Roster" /></div>
+                </div>
+                <div className="border-t border-slate-700 pt-6">
+                  <h2 className="text-lg font-bold mb-3 text-red-400">Opponent</h2>
+                  <PlayerForm onAdd={addOppPlayer} label="Add Player to Opponent's Team" />
+                  <div className="mt-4"><PlayerList players={oppPlayers} onRemove={removeOppPlayer} onToggleInjured={toggleOppInjured} schedule={schedule} matchupDates={matchupDates} label="Opponent Roster" /></div>
+                </div>
+              </div>
+            )}
+
+            {/* SCHEDULE */}
+            {tab === "schedule" && (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-lg font-bold">NBA Schedule - Matchup Week</h2>
+                  <button onClick={fetchSchedule} disabled={loading} className="bg-slate-700 hover:bg-slate-600 text-sm px-4 py-2 rounded-lg text-white">{loading ? "Loading..." : "Refresh"}</button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {matchupDates.map(date => {
+                    const teams = schedule[date] || [];
+                    const myPlaying = myPlayers.filter(p => teams.includes(p.team) && !p.injured);
+                    const oppPlaying = oppPlayers.filter(p => teams.includes(p.team) && !p.injured);
+                    return (
+                      <div key={date} className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                        <div className="text-sm font-bold text-orange-400 mb-2">{formatDate(date)}</div>
+                        <div className="text-xs text-slate-400 mb-2">{teams.length / 2} games</div>
+                        <div className="flex flex-wrap gap-1">
+                          {NBA_TEAMS.filter(t => teams.includes(t)).map(t => {
+                            const isMine = myPlayers.some(p => p.team === t);
+                            const isOpp = oppPlayers.some(p => p.team === t);
+                            return <span key={t} className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${isMine ? "bg-green-900/50 text-green-400 ring-1 ring-green-600" : isOpp ? "bg-red-900/50 text-red-400 ring-1 ring-red-600" : "bg-slate-800 text-slate-500"}`}>{t}</span>;
+                          })}
+                        </div>
+                        <div className="mt-2 flex gap-3 text-xs">
+                          <span className="text-green-400">{myPlaying.length} mine</span>
+                          <span className="text-red-400">{oppPlaying.length} theirs</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                  <h3 className="text-sm font-bold text-slate-300 mb-3">Total Games This Week</h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="text-center"><div className="text-3xl font-bold text-green-400 font-mono">{myGames}</div><div className="text-xs text-slate-400">My Player-Games</div></div>
+                    <div className="text-center"><div className="text-3xl font-bold text-red-400 font-mono">{oppGames}</div><div className="text-xs text-slate-400">Opponent Player-Games</div></div>
+                  </div>
+                  {myGames !== oppGames && <div className={`text-center text-sm mt-2 ${myGames > oppGames ? "text-green-400" : "text-red-400"}`}>{myGames > oppGames ? `+${myGames - oppGames} game advantage!` : `Opponent has ${oppGames - myGames} more games. Stream!`}</div>}
+                </div>
+              </div>
+            )}
+
+            {/* OPTIMIZER */}
+            {tab === "optimizer" && (
+              <div className="space-y-4">
+                <h2 className="text-lg font-bold">Daily Lineup Optimizer</h2>
+                <p className="text-sm text-slate-400">{Object.keys(schedule).length === 0 ? "Fetch the schedule first!" : "Optimal lineup for each day, maximizing projected FPTS."}</p>
+                <div className="flex gap-2 overflow-x-auto pb-2">
+                  {matchupDates.map((date, i) => {
+                    const dl = dailyLineups[i];
+                    return (
+                      <button key={date} onClick={() => setSelectedDay(selectedDay === date ? null : date)} className={`flex-shrink-0 rounded-xl px-4 py-3 text-center border transition-all ${selectedDay === date ? "bg-orange-600/20 border-orange-500" : "bg-slate-900 border-slate-800 hover:border-slate-600"}`}>
+                        <div className="text-xs text-slate-400">{formatDate(date)}</div>
+                        <div className="text-lg font-bold font-mono text-orange-400">{dl?.score.toFixed(0) || 0}</div>
+                        <div className="text-[10px] text-slate-500">{dl?.lineup.filter(Boolean).length || 0} starters</div>
+                      </button>
+                    );
+                  })}
+                  <div className="flex-shrink-0 rounded-xl px-4 py-3 text-center bg-gradient-to-b from-orange-900/30 to-slate-900 border border-orange-800">
+                    <div className="text-xs text-slate-400">WEEK</div>
+                    <div className="text-lg font-bold font-mono text-orange-400">{myTotal.toFixed(0)}</div>
+                    <div className="text-[10px] text-orange-500">TOTAL</div>
+                  </div>
+                </div>
+
+                {(selectedDay ? [matchupDates.indexOf(selectedDay)] : matchupDates.map((_, i) => i)).map(i => {
+                  const dl = dailyLineups[i];
+                  if (!dl) return null;
+                  return (
+                    <div key={dl.date} className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                      <div className="flex justify-between items-center mb-3">
+                        <h3 className="text-sm font-bold text-orange-400">{formatDate(dl.date)}</h3>
+                        <span className="text-sm font-mono font-bold text-white">{dl.score.toFixed(1)} FPTS</span>
+                      </div>
+                      <div className="space-y-1 mb-3">
+                        {ROSTER_SLOTS.map((slot, si) => {
+                          const player = dl.lineup[si];
+                          return (
+                            <div key={slot.id + si} className="flex items-center gap-2 bg-slate-800/50 rounded-lg px-3 py-1.5">
+                              <span className="text-xs font-bold text-orange-400 w-10">{slot.label}</span>
+                              {player ? (<><span className="text-sm text-white flex-1">{player.name}</span><Badge>{player.team}</Badge><span className="text-sm font-mono font-bold text-green-400">{player.projFPTS.toFixed(1)}</span></>) : (<span className="text-sm text-slate-600 flex-1 italic">Empty</span>)}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {dl.bench.length > 0 && (
+                        <div className="mt-2"><div className="text-[10px] text-slate-500 uppercase mb-1">Bench (playing but not starting)</div>
+                          <div className="flex flex-wrap gap-1">{dl.bench.map(p => <span key={p.id} className="text-xs bg-yellow-900/30 text-yellow-400 px-2 py-0.5 rounded">{p.name} ({p.projFPTS.toFixed(1)})</span>)}</div>
+                        </div>
+                      )}
+                      {dl.sitting.length > 0 && (
+                        <div className="mt-2"><div className="text-[10px] text-slate-500 uppercase mb-1">Not playing</div>
+                          <div className="flex flex-wrap gap-1">{dl.sitting.map(p => <span key={p.id} className="text-xs bg-slate-800 text-slate-600 px-2 py-0.5 rounded">{p.name}</span>)}</div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* H2H BATTLE */}
+            {tab === "battle" && (
+              <div className="space-y-6">
+                <h2 className="text-lg font-bold">Head-to-Head Matchup Projection</h2>
+                <div className="bg-gradient-to-r from-green-900/20 via-slate-900 to-red-900/20 rounded-2xl p-8 border border-slate-700 text-center">
+                  <div className="flex items-center justify-center gap-8">
+                    <div><div className="text-xs text-slate-400 uppercase mb-1">Your Team</div><div className={`text-4xl font-bold font-mono ${myTotal > oppTotal ? "text-green-400" : "text-white"}`}>{myTotal.toFixed(0)}</div><div className="text-xs text-slate-500 mt-1">{myGames} player-games</div></div>
+                    <div className="text-2xl text-slate-600 font-bold">VS</div>
+                    <div><div className="text-xs text-slate-400 uppercase mb-1">Opponent</div><div className={`text-4xl font-bold font-mono ${oppTotal > myTotal ? "text-red-400" : "text-white"}`}>{oppTotal.toFixed(0)}</div><div className="text-xs text-slate-500 mt-1">{oppGames} player-games</div></div>
+                  </div>
+                  <div className="mt-4">
+                    {myTotal > oppTotal ? <div className="text-lg font-bold text-green-400">Projected WIN by {(myTotal - oppTotal).toFixed(0)} points!</div>
+                    : myTotal < oppTotal ? <div className="text-lg font-bold text-red-400">Projected deficit: {(oppTotal - myTotal).toFixed(0)} pts. Stream!</div>
+                    : <div className="text-lg font-bold text-yellow-400">Dead even! Every decision counts.</div>}
+                  </div>
+                </div>
+
+                <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                  <h3 className="text-sm font-bold text-slate-300 mb-3">Daily Breakdown</h3>
+                  <div className="space-y-2">
+                    {matchupDates.map((date, i) => {
+                      const my = dailyLineups[i]?.score || 0;
+                      const opp = oppDaily[i]?.score || 0;
+                      const max = Math.max(my, opp, 1);
+                      return (
+                        <div key={date}>
+                          <div className="flex justify-between text-xs text-slate-400 mb-0.5"><span>{formatDate(date)}</span><span className="font-mono">{my.toFixed(0)} - {opp.toFixed(0)}</span></div>
+                          <div className="flex gap-1 h-4">
+                            <div className="bg-green-600 rounded-l" style={{ width: `${(my / max) * 50}%` }} />
+                            <div className="bg-red-600 rounded-r" style={{ width: `${(opp / max) * 50}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="bg-slate-900 rounded-xl p-4 border border-slate-800">
+                  <h3 className="text-sm font-bold text-slate-300 mb-3">Strategy Tips</h3>
+                  <div className="space-y-2 text-sm text-slate-400">
+                    {myGames < oppGames && <div className="flex gap-2 items-start"><span className="text-red-400 text-lg leading-none">!</span><span>Fewer games ({myGames} vs {oppGames}). Pick up streamers for light days!</span></div>}
+                    {(() => {
+                      const light = dailyLineups.filter(d => d.lineup.filter(Boolean).length < 8);
+                      return light.length > 0 ? <div className="flex gap-2 items-start"><span className="text-yellow-400 text-lg leading-none">!</span><span>Light days: {light.map(d => formatDate(d.date)).join(", ")}. Stream players for these days!</span></div> : null;
+                    })()}
+                    <div className="flex gap-2 items-start"><span className="text-green-400 text-lg leading-none">*</span><span>STL and BLK = 4pts each. Prioritize elite defensive players.</span></div>
+                    <div className="flex gap-2 items-start"><span className="text-green-400 text-lg leading-none">*</span><span>FGA = -1, FGM = +2. Efficient high-volume shooters are gold.</span></div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
